@@ -367,89 +367,85 @@ class TextToSpeech:
             torch.load(get_model_path("cvvp.pth", self.models_dir))
         )
 
-    def get_conditioning_latents(
-        self,
-        voice_samples,
-        return_mels=False,
-        latent_averaging_mode=0,
-        original_tortoise=False,
-    ):
-        """
-        Transforms one or more voice_samples into a tuple (autoregressive_conditioning_latent, diffusion_conditioning_latent).
-        These are expressive learned latents that encode aspects of the provided clips like voice, intonation, and acoustic
-        properties.
-        :param voice_samples: List of arbitrary reference clips, which should be *pairs* of torch tensors containing arbitrary kHz waveform data.
-        :param latent_averaging_mode: 0/1/2 for following modes:
-            0 - latents will be generated as in original tortoise, using ~4.27s from each voice sample, averaging latent across all samples
-            1 - latents will be generated using (almost) entire voice samples, averaged across all the ~4.27s chunks
-            2 - latents will be generated using (almost) entire voice samples, averaged per voice sample
-        """
-        assert latent_averaging_mode in [
-            0,
-            1,
-            2,
-        ], "latent_averaging mode has to be one of (0, 1, 2)"
-        print("mode", latent_averaging_mode)
-        with torch.no_grad():
-            voice_samples = [[v.to(self.device) for v in ls] for ls in voice_samples]
+    def get_conditioning_latents(self, voice_samples, return_mels=False, latent_averaging_mode=0, original_tortoise=False):
+      """
+      Transforms one or more voice_samples into a tuple (autoregressive_conditioning_latent, diffusion_conditioning_latent).
+      These are expressive learned latents that encode aspects of the provided clips like voice, intonation, and acoustic
+      properties.
+      :param voice_samples: List of arbitrary reference clips, which should be *pairs* of torch tensors containing arbitrary kHz waveform data.
+      :param latent_averaging_mode: 0/1/2 for following modes:
+          0 - latents will be generated as in the original tortoise, using ~4.27s from each voice sample, averaging latent across all samples
+          1 - latents will be generated using (almost) entire voice samples, averaged across all the ~4.27s chunks
+          2 - latents will be generated using (almost) entire voice samples, averaged per voice sample
+      """
+      assert latent_averaging_mode in [0, 1, 2], "latent_averaging mode has to be one of (0, 1, 2)"
+      print("mode", latent_averaging_mode)
+      device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-            auto_conds = []
-            for ls in voice_samples:
-                auto_conds.append(format_conditioning(ls[0], device=self.device))
-            auto_conds = torch.stack(auto_conds, dim=1)
-            with self.temporary_cuda(self.autoregressive) as ar:
-                auto_latent = ar.get_conditioning(auto_conds)
+      with torch.no_grad():
+          # Move the entire nested structure to the device
+          voice_samples = [
+              (pair[0].to(device), pair[1].to(device))
+              for pair in voice_samples
+          ]
 
-            diffusion_conds = []
+          auto_conds = []
+          for ls in voice_samples:
+              auto_conds.append(format_conditioning(ls[0], device=device))  # Use device here
+          auto_conds = torch.stack(auto_conds, dim=1)
+          with self.temporary_cuda(self.autoregressive) as ar:
+              auto_latent = ar.get_conditioning(auto_conds)
 
-            DURS_CONST = 102400
-            for ls in voice_samples:
-                # The diffuser operates at a sample rate of 24000 (except for the latent inputs)
-                sample = (
-                    torchaudio.functional.resample(ls[0], 22050, 24000)
-                    if original_tortoise
-                    else ls[1]
-                )
-                if latent_averaging_mode == 0:
-                    sample = pad_or_truncate(sample, DURS_CONST)
-                    cond_mel = wav_to_univnet_mel(
-                        sample.to(self.device),
-                        do_normalization=False,
-                        device=self.device,
-                    )
-                    diffusion_conds.append(cond_mel)
-                else:
-                    from math import ceil
+          diffusion_conds = []
 
-                    if latent_averaging_mode == 2:
-                        temp_diffusion_conds = []
-                    for chunk in range(ceil(sample.shape[1] / DURS_CONST)):
-                        current_sample = sample[
-                            :, chunk * DURS_CONST : (chunk + 1) * DURS_CONST
-                        ]
-                        current_sample = pad_or_truncate(current_sample, DURS_CONST)
-                        cond_mel = wav_to_univnet_mel(
-                            current_sample.to(self.device),
-                            do_normalization=False,
-                            device=self.device,
-                        )
-                        if latent_averaging_mode == 1:
-                            diffusion_conds.append(cond_mel)
-                        elif latent_averaging_mode == 2:
-                            temp_diffusion_conds.append(cond_mel)
-                    if latent_averaging_mode == 2:
-                        diffusion_conds.append(
-                            torch.stack(temp_diffusion_conds).mean(0)
-                        )
-            diffusion_conds = torch.stack(diffusion_conds, dim=1)
+          DURS_CONST = 102400
+          for ls in voice_samples:
+              # The diffuser operates at a sample rate of 24000 (except for the latent inputs)
+              sample = (
+                  torchaudio.functional.resample(ls[0], 22050, 24000)
+                  if original_tortoise
+                  else ls[1]
+              )
+              if latent_averaging_mode == 0:
+                  sample = pad_or_truncate(sample, DURS_CONST)
+                  cond_mel = wav_to_univnet_mel(
+                      sample.to(device),  # Use device here
+                      do_normalization=False,
+                      device=device,
+                  )
+                  diffusion_conds.append(cond_mel)
+              else:
+                  from math import ceil
 
-            with self.temporary_cuda(self.diffusion) as diffusion:
-                diffusion_latent = diffusion.get_conditioning(diffusion_conds)
+                  if latent_averaging_mode == 2:
+                      temp_diffusion_conds = []
+                  for chunk in range(ceil(sample.shape[1] / DURS_CONST)):
+                      current_sample = sample[
+                          :, chunk * DURS_CONST : (chunk + 1) * DURS_CONST
+                      ]
+                      current_sample = pad_or_truncate(current_sample, DURS_CONST)
+                      cond_mel = wav_to_univnet_mel(
+                          current_sample.to(device),  # Use device here
+                          do_normalization=False,
+                          device=device,
+                      )
+                      if latent_averaging_mode == 1:
+                          diffusion_conds.append(cond_mel)
+                      elif latent_averaging_mode == 2:
+                          temp_diffusion_conds.append(cond_mel)
+                  if latent_averaging_mode == 2:
+                      diffusion_conds.append(
+                          torch.stack(temp_diffusion_conds).mean(0)
+                      )
+          diffusion_conds = torch.stack(diffusion_conds, dim=1)
 
-        if return_mels:
-            return auto_latent, diffusion_latent, auto_conds, diffusion_conds
-        else:
-            return auto_latent, diffusion_latent
+          with self.temporary_cuda(self.diffusion) as diffusion:
+              diffusion_latent = diffusion.get_conditioning(diffusion_conds)
+
+      if return_mels:
+          return auto_latent, diffusion_latent, auto_conds, diffusion_conds
+      else:
+          return auto_latent, diffusion_latent
 
     def get_random_conditioning_latents(self):
         # Lazy-load the RLG models.

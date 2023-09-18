@@ -75,3 +75,6 @@ def get_model_path(model_name, models_dir=MODELS_DIR):
         download_models([model_name])
     return model_path
 
+if __name__ == "__main__":
+    download_models() # to download all models
+    

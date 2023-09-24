@@ -140,10 +140,3 @@ debug_states/*
 notes.md
 TensorRT/
 k-diffusion/
-
-
-#binary files
-examples/
-examples_new/
-optimized_examples/
-tortoise/voices/*
